@@ -1,7 +1,8 @@
 import copy
+import io
 import re
 import tkinter as tk
-from tkinter import colorchooser, ttk
+from tkinter import colorchooser, filedialog, ttk
 
 import matplotlib
 
@@ -10,8 +11,25 @@ matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import pywintypes
 import xlwings as xw
+import win32clipboard
+import win32con
+from PIL import Image
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+
+GRAPH_EXPORT_DPI = 300
+
+
+def figure_to_dib(figure):
+    png = io.BytesIO()
+    figure.savefig(png, format="png", dpi=GRAPH_EXPORT_DPI, bbox_inches="tight")
+    png.seek(0)
+    with Image.open(png) as image:
+        bitmap = io.BytesIO()
+        image.convert("RGB").save(bitmap, format="BMP")
+    return bitmap.getvalue()[14:]
 
 
 def parse_bins(specification, values, axis_label):
@@ -125,6 +143,16 @@ class HeatMapApp:
         ttk.Label(self.content, text="Generated heat map", font=("", 12, "bold")).pack(
             anchor="w", pady=(0, 6)
         )
+        export_buttons = ttk.Frame(self.content)
+        export_buttons.pack(anchor="w", pady=(0, 6))
+        ttk.Button(
+            export_buttons, text="Save graph", command=self.save_graph
+        ).pack(side="left", padx=(0, 6))
+        ttk.Button(
+            export_buttons,
+            text="Copy graph to clipboard",
+            command=self.copy_graph_to_clipboard,
+        ).pack(side="left")
         self.plot_frame = ttk.Frame(self.content)
         self.plot_frame.pack(fill="both", expand=True)
 
@@ -539,6 +567,49 @@ class HeatMapApp:
         self.figure_canvas = FigureCanvasTkAgg(figure, master=self.plot_frame)
         self.figure_canvas.draw()
         self.figure_canvas.get_tk_widget().pack(fill="both", expand=True)
+
+    def save_graph(self):
+        if self.figure is None:
+            self.set_status("Generate a heat map before saving it.", error=True)
+            return
+        path = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="Save heat map",
+            defaultextension=".png",
+            filetypes=[
+                ("PNG image", "*.png"),
+                ("JPEG image", "*.jpg *.jpeg"),
+                ("PDF document", "*.pdf"),
+                ("SVG image", "*.svg"),
+            ],
+        )
+        if not path:
+            return
+        try:
+            self.figure.savefig(path, dpi=GRAPH_EXPORT_DPI, bbox_inches="tight")
+        except (OSError, RuntimeError, ValueError, tk.TclError) as exc:
+            self.set_status(f"Could not save graph: {exc}", error=True)
+        else:
+            self.set_status(f"Graph saved to {path}")
+
+    def copy_graph_to_clipboard(self):
+        if self.figure is None:
+            self.set_status("Generate a heat map before copying it.", error=True)
+            return
+        try:
+            dib = figure_to_dib(self.figure)
+            win32clipboard.OpenClipboard()
+            try:
+                win32clipboard.EmptyClipboard()
+                win32clipboard.SetClipboardData(win32con.CF_DIB, dib)
+            finally:
+                win32clipboard.CloseClipboard()
+        except (OSError, RuntimeError, ValueError, tk.TclError, pywintypes.error) as exc:
+            self.set_status(f"Could not copy graph to clipboard: {exc}", error=True)
+        else:
+            self.set_status(
+                f"Graph copied to the clipboard at {GRAPH_EXPORT_DPI} DPI."
+            )
 
 
 def main():
