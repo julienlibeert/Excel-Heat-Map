@@ -17,6 +17,8 @@ import win32con
 from PIL import Image
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.colors import is_color_like
+from matplotlib.figure import Figure
+from trend_navigator import TrendNavigator
 
 
 GRAPH_EXPORT_DPI = 300
@@ -115,7 +117,7 @@ def validate_limits(lower, upper, label):
 class HeatMapApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Excel Heat Map")
+        self.root.title("Excel Heat Map and Trend Navigator")
         self.root.geometry("1100x900")
         self.workbook_entries = {}
         self.saved_settings = {}
@@ -132,9 +134,16 @@ class HeatMapApp:
         scrollbar = ttk.Scrollbar(
             self.root, orient="vertical", command=self.scroll_canvas.yview
         )
-        self.scroll_canvas.configure(yscrollcommand=scrollbar.set)
+        horizontal_scrollbar = ttk.Scrollbar(
+            self.root, orient="horizontal", command=self.scroll_canvas.xview
+        )
+        self.scroll_canvas.configure(
+            xscrollcommand=horizontal_scrollbar.set, yscrollcommand=scrollbar.set
+        )
         self.scroll_canvas.grid(row=0, column=0, sticky="nsew")
         scrollbar.grid(row=0, column=1, sticky="ns")
+        horizontal_scrollbar.grid(row=1, column=0, sticky="ew")
+        self.root.rowconfigure(1, weight=0)
 
         self.content = ttk.Frame(self.scroll_canvas, padding=12)
         self.content_window = self.scroll_canvas.create_window(
@@ -148,9 +157,7 @@ class HeatMapApp:
         )
         self.scroll_canvas.bind(
             "<Configure>",
-            lambda event: self.scroll_canvas.itemconfigure(
-                self.content_window, width=event.width
-            ),
+            self._resize_content,
         )
         self.scroll_canvas.bind_all("<MouseWheel>", self._on_mousewheel)
 
@@ -182,33 +189,25 @@ class HeatMapApp:
         self.saved_settings_var = tk.StringVar()
 
         self._build_controls()
-        ttk.Separator(self.content).pack(fill="x", pady=(14, 8))
-        ttk.Label(self.content, text="Generated heat map", font=("", 12, "bold")).pack(
-            anchor="w", pady=(0, 6)
-        )
-        export_buttons = ttk.Frame(self.content)
-        export_buttons.pack(anchor="w", pady=(0, 6))
-        ttk.Button(
-            export_buttons, text="Save graph", command=self.save_graph
-        ).pack(side="left", padx=(0, 6))
-        ttk.Button(
-            export_buttons,
-            text="Copy graph to clipboard",
-            command=self.copy_graph_to_clipboard,
-        ).pack(side="left")
-        self.plot_frame = ttk.Frame(self.content)
-        self.plot_frame.pack(fill="both", expand=True)
+
+    def _resize_content(self, event):
+        width = max(event.width, self.content.winfo_reqwidth())
+        self.scroll_canvas.itemconfigure(self.content_window, width=width)
 
     def _on_mousewheel(self, event):
         self.scroll_canvas.yview_scroll(int(-event.delta / 120), "units")
 
-    def _section(self, text):
-        ttk.Label(self.content, text=text, font=("", 10, "bold")).pack(
+    def _section(self, text, parent=None):
+        if parent is None:
+            parent = self.content
+        ttk.Label(parent, text=text, font=("", 10, "bold")).pack(
             anchor="w", pady=(10, 4)
         )
 
-    def _entry_row(self, label, variable, placeholder=None, width=36):
-        row = ttk.Frame(self.content)
+    def _entry_row(self, label, variable, placeholder=None, width=36, parent=None):
+        if parent is None:
+            parent = self.content
+        row = ttk.Frame(parent)
         row.pack(fill="x", pady=2)
         ttk.Label(row, text=label, width=22).pack(side="left")
         entry = ttk.Entry(row, textvariable=variable, width=width)
@@ -219,8 +218,10 @@ class HeatMapApp:
             )
         return entry
 
-    def _combo_row(self, label, variable, values=(), width=48):
-        row = ttk.Frame(self.content)
+    def _combo_row(self, label, variable, values=(), width=48, parent=None):
+        if parent is None:
+            parent = self.content
+        row = ttk.Frame(parent)
         row.pack(fill="x", pady=2)
         ttk.Label(row, text=label, width=22).pack(side="left")
         combo = ttk.Combobox(
@@ -230,7 +231,7 @@ class HeatMapApp:
         return combo
 
     def _build_controls(self):
-        self._section("1. Choose an open workbook and sheet")
+        self._section("Shared Excel data source")
         row = ttk.Frame(self.content)
         row.pack(fill="x", pady=2)
         ttk.Label(row, text="Workbook:", width=22).pack(side="left")
@@ -248,34 +249,68 @@ class HeatMapApp:
         self.sheet_combo.bind(
             "<<ComboboxSelected>>", lambda *_args: self.on_sheet_change()
         )
-
-        self._section("2. Select a table or enter a source range (include headers)")
         self.table_combo = self._combo_row("Excel table:", self.table_var)
         self.table_combo.bind(
             "<<ComboboxSelected>>", lambda *_args: self.on_table_change()
         )
         self._entry_row("Source range:", self.source_range_var, "e.g. A1:C500")
         ttk.Button(self.content, text="Load columns", command=self.load_columns).pack(
-            anchor="w", pady=4
+            anchor="w", pady=(4, 8)
         )
 
-        self._section("3. Choose data columns and heat-map settings")
-        self.x_combo = self._combo_row("X column:", self.x_var)
-        self.y_combo = self._combo_row("Y column:", self.y_var)
-        self.weight_combo = self._combo_row("Weight:", self.weight_var)
-        self._entry_row("X bin width:", self.x_bins_var, "in X-axis units")
-        self._entry_row("Y bin height:", self.y_bins_var, "in Y-axis units")
+        self.status_label = ttk.Label(
+            self.content, textvariable=self.status_var, wraplength=950
+        )
+        self.status_label.pack(anchor="w", pady=(0, 6))
+
+        self.graph_tabs = ttk.Notebook(self.content)
+        self.graph_tabs.pack(fill="both", expand=True)
+        self.heatmap_tab = ttk.Frame(self.graph_tabs, padding=8)
+        self.trend_tab = ttk.Frame(self.graph_tabs, padding=8)
+        self.graph_tabs.add(self.heatmap_tab, text="Heat map")
+        self.graph_tabs.add(self.trend_tab, text="Trend navigator")
+        self._build_heatmap_controls(self.heatmap_tab)
+        self.trend_navigator = TrendNavigator(
+            self.trend_tab,
+            data_provider=self.get_source_frame,
+            save_figure=lambda figure, title: self.save_graph(
+                figure, title, use_heatmap=False
+            ),
+            copy_figure=lambda figure: self.copy_graph_to_clipboard(
+                figure, use_heatmap=False
+            ),
+            set_status=self.set_status,
+        )
+
+    def _build_heatmap_controls(self, parent):
+        ttk.Label(
+            parent, text="Heat-map settings", font=("", 10, "bold")
+        ).pack(anchor="w", pady=(0, 4))
+        self.x_combo = self._combo_row("X column:", self.x_var, parent=parent)
+        self.y_combo = self._combo_row("Y column:", self.y_var, parent=parent)
+        self.weight_combo = self._combo_row("Weight:", self.weight_var, parent=parent)
+        self._entry_row(
+            "X bin width:", self.x_bins_var, "in X-axis units", parent=parent
+        )
+        self._entry_row(
+            "Y bin height:", self.y_bins_var, "in Y-axis units", parent=parent
+        )
         self._combo_row(
             "Aggregate:",
             self.aggregate_var,
             ["Bin count", "Sum of weights", "Average of weights"],
+            parent=parent,
         )
-        self._entry_row("Graph title:", self.plot_title_var)
-        self._entry_row("X-axis title:", self.x_title_var, "blank uses column name")
-        self._entry_row("Y-axis title:", self.y_title_var, "blank uses column name")
+        self._entry_row("Graph title:", self.plot_title_var, parent=parent)
+        self._entry_row(
+            "X-axis title:", self.x_title_var, "blank uses column name", parent=parent
+        )
+        self._entry_row(
+            "Y-axis title:", self.y_title_var, "blank uses column name", parent=parent
+        )
 
-        self._section("Weights colormap")
-        row = ttk.Frame(self.content)
+        self._section("Weights colormap", parent)
+        row = ttk.Frame(parent)
         row.pack(fill="x", pady=2)
         ttk.Label(row, text="Weights colormap:", width=22).pack(side="left")
         self.cmap_combo = ttk.Combobox(
@@ -295,29 +330,29 @@ class HeatMapApp:
             command=self.update_cmap_preview,
         ).pack(side="left", padx=(8, 0))
         self.cmap_preview = tk.Canvas(
-            self.content, height=18, width=400, highlightthickness=0
+            parent, height=18, width=400, highlightthickness=0
         )
         self.cmap_preview.pack(anchor="w", padx=(22, 0), pady=3)
         self.update_cmap_preview()
 
-        self._section("Axis ranges (leave blank for automatic limits)")
-        self._entry_row("X-axis minimum:", self.x_min_var)
-        self._entry_row("X-axis maximum:", self.x_max_var)
-        self._entry_row("Y-axis minimum:", self.y_min_var)
-        self._entry_row("Y-axis maximum:", self.y_max_var)
+        self._section("Axis ranges (leave blank for automatic limits)", parent)
+        self._entry_row("X-axis minimum:", self.x_min_var, parent=parent)
+        self._entry_row("X-axis maximum:", self.x_max_var, parent=parent)
+        self._entry_row("Y-axis minimum:", self.y_min_var, parent=parent)
+        self._entry_row("Y-axis maximum:", self.y_max_var, parent=parent)
 
-        self._section("Legend range and out-of-range colors")
-        self._entry_row("Legend minimum:", self.legend_min_var)
-        self._entry_row("Legend maximum:", self.legend_max_var)
-        self._color_row("Below range:", self.under_color_var)
-        self._color_row("Above range:", self.over_color_var)
+        self._section("Legend range and out-of-range colors", parent)
+        self._entry_row("Legend minimum:", self.legend_min_var, parent=parent)
+        self._entry_row("Legend maximum:", self.legend_max_var, parent=parent)
+        self._color_row("Below range:", self.under_color_var, parent=parent)
+        self._color_row("Above range:", self.over_color_var, parent=parent)
 
-        self._section("Saved graph settings for this workbook")
-        self._entry_row("Settings name:", self.settings_name_var)
+        self._section("Saved heat-map settings for this workbook", parent)
+        self._entry_row("Settings name:", self.settings_name_var, parent=parent)
         self.saved_settings_combo = self._combo_row(
-            "Saved settings:", self.saved_settings_var
+            "Saved settings:", self.saved_settings_var, parent=parent
         )
-        settings_buttons = ttk.Frame(self.content)
+        settings_buttons = ttk.Frame(parent)
         settings_buttons.pack(anchor="w", pady=4)
         ttk.Button(
             settings_buttons, text="Save settings", command=self.save_settings
@@ -332,15 +367,29 @@ class HeatMapApp:
         ).pack(side="left")
 
         ttk.Button(
-            self.content, text="Plot heat map", command=self.plot_heatmap
+            parent, text="Plot heat map", command=self.plot_heatmap
         ).pack(anchor="w", pady=(10, 4))
-        self.status_label = ttk.Label(
-            self.content, textvariable=self.status_var, wraplength=900
+        ttk.Separator(parent).pack(fill="x", pady=(12, 6))
+        ttk.Label(parent, text="Generated heat map", font=("", 12, "bold")).pack(
+            anchor="w", pady=(0, 6)
         )
-        self.status_label.pack(anchor="w", pady=(2, 6))
+        export_buttons = ttk.Frame(parent)
+        export_buttons.pack(anchor="w", pady=(0, 6))
+        ttk.Button(
+            export_buttons, text="Save graph", command=self.save_graph
+        ).pack(side="left", padx=(0, 6))
+        ttk.Button(
+            export_buttons,
+            text="Copy graph to clipboard",
+            command=self.copy_graph_to_clipboard,
+        ).pack(side="left")
+        self.plot_frame = ttk.Frame(parent)
+        self.plot_frame.pack(fill="both", expand=True)
 
-    def _color_row(self, label, variable):
-        row = ttk.Frame(self.content)
+    def _color_row(self, label, variable, parent=None):
+        if parent is None:
+            parent = self.content
+        row = ttk.Frame(parent)
         row.pack(fill="x", pady=2)
         ttk.Label(row, text=label, width=22).pack(side="left")
         ttk.Entry(row, textvariable=variable, width=18).pack(side="left")
@@ -448,6 +497,7 @@ class HeatMapApp:
 
     def refresh_workbooks(self):
         try:
+            self.trend_navigator.set_columns([])
             self.workbook_entries = self.open_workbook_entries()
             labels = list(self.workbook_entries)
             self.workbook_combo.configure(values=labels)
@@ -495,12 +545,14 @@ class HeatMapApp:
         try:
             self.refresh_sheets()
             self.refresh_saved_settings()
+            self.trend_navigator.set_columns([])
         except (ValueError, TypeError, KeyError, IndexError) as exc:
             self.set_status(str(exc), error=True)
 
     def on_sheet_change(self):
         try:
             self.refresh_tables()
+            self.trend_navigator.set_columns([])
         except (ValueError, TypeError, KeyError, IndexError) as exc:
             self.set_status(str(exc), error=True)
 
@@ -510,6 +562,7 @@ class HeatMapApp:
                 self.table_var.get()
             ]
             self.source_range_var.set(table.range.address)
+            self.trend_navigator.set_columns([])
             self.set_status(
                 "Table range selected. Load columns to refresh the X/Y/weight choices."
             )
@@ -534,6 +587,19 @@ class HeatMapApp:
         return sheet.range(address).options(
             pd.DataFrame, header=1, index=False
         ).value
+
+    def get_source_frame(self):
+        if not self.sheet_var.get():
+            raise ValueError("Select an open workbook and sheet first.")
+        address = self.source_range_var.get().strip()
+        if not address:
+            raise ValueError("Choose a table or enter a source range first.")
+        frame = self.read_source_frame(
+            self.selected_book().sheets[self.sheet_var.get()], address
+        )
+        if frame is None or frame.empty:
+            raise ValueError("The selected source contains no data rows.")
+        return frame
 
     def source_column_names(self, frame):
         if frame is None or frame.empty or len(frame.columns) == 0:
@@ -562,6 +628,7 @@ class HeatMapApp:
             sheet = self.selected_book().sheets[self.sheet_var.get()]
             frame = self.read_source_frame(sheet, address)
             columns = self.source_column_names(frame)
+            self.trend_navigator.set_columns(columns, frame)
             self.x_combo.configure(values=columns)
             self.y_combo.configure(values=columns)
             self.weight_combo.configure(values=["(none)"] + columns)
@@ -768,6 +835,7 @@ class HeatMapApp:
                 text_value("Y bin height"), y_values[valid], y_min, y_max, "Y"
             )
 
+            self.trend_navigator.set_columns(columns, frame)
             self.sheet_combo.configure(
                 values=[sheet.name for sheet in book.sheets]
             )
@@ -918,7 +986,8 @@ class HeatMapApp:
                     )
                     color_label = "Average of weights"
 
-            figure, ax = plt.subplots(figsize=(9, 6))
+            figure = Figure(figsize=(9, 6))
+            ax = figure.add_subplot(111)
             cmap = copy.copy(plt.get_cmap(self.cmap_var.get()))
             if self.reverse_cmap_var.get():
                 cmap = cmap.reversed()
@@ -963,19 +1032,21 @@ class HeatMapApp:
         if self.figure_canvas is not None:
             self.figure_canvas.get_tk_widget().destroy()
         if self.figure is not None:
-            plt.close(self.figure)
+            self.figure.clear()
         self.figure = figure
         self.figure_canvas = FigureCanvasTkAgg(figure, master=self.plot_frame)
         self.figure_canvas.draw()
         self.figure_canvas.get_tk_widget().pack(fill="both", expand=True)
 
-    def save_graph(self):
-        if self.figure is None:
-            self.set_status("Generate a heat map before saving it.", error=True)
+    def save_graph(self, figure=None, graph_title="heat map", use_heatmap=True):
+        if figure is None and use_heatmap:
+            figure = self.figure
+        if figure is None:
+            self.set_status(f"Generate a {graph_title} before saving it.", error=True)
             return
         path = filedialog.asksaveasfilename(
             parent=self.root,
-            title="Save heat map",
+            title=f"Save {graph_title}",
             defaultextension=".png",
             filetypes=[
                 ("PNG image", "*.png"),
@@ -987,18 +1058,20 @@ class HeatMapApp:
         if not path:
             return
         try:
-            self.figure.savefig(path, dpi=GRAPH_EXPORT_DPI, bbox_inches="tight")
+            figure.savefig(path, dpi=GRAPH_EXPORT_DPI, bbox_inches="tight")
         except (OSError, RuntimeError, ValueError, tk.TclError) as exc:
             self.set_status(f"Could not save graph: {exc}", error=True)
         else:
             self.set_status(f"Graph saved to {path}")
 
-    def copy_graph_to_clipboard(self):
-        if self.figure is None:
-            self.set_status("Generate a heat map before copying it.", error=True)
+    def copy_graph_to_clipboard(self, figure=None, use_heatmap=True):
+        if figure is None and use_heatmap:
+            figure = self.figure
+        if figure is None:
+            self.set_status("Generate a graph before copying it.", error=True)
             return
         try:
-            dib = figure_to_dib(self.figure)
+            dib = figure_to_dib(figure)
             win32clipboard.OpenClipboard()
             try:
                 win32clipboard.EmptyClipboard()
