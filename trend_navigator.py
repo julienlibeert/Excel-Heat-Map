@@ -206,6 +206,7 @@ class TrendRow:
     visible: tk.BooleanVar
     column: tk.StringVar
     label: tk.StringVar
+    chart_index: tk.StringVar
     side: tk.StringVar
     minimum: tk.StringVar
     maximum: tk.StringVar
@@ -223,7 +224,7 @@ class Hairline:
     frame: ttk.Frame
     time: tk.StringVar
     color: str
-    artist: object | None = None
+    artists: list = field(default_factory=list)
     readout_artists: list = field(default_factory=list)
 
 
@@ -261,6 +262,7 @@ class TrendNavigator:
         self.canvas = None
         self.figure_fixed_size = False
         self.base_axes = None
+        self.chart_axes = {}
         self.axes_by_group = {}
         self.plotted_series = []
         self.data_time_range = None
@@ -273,6 +275,7 @@ class TrendNavigator:
         self.end_time = tk.StringVar()
         self.color_mode = tk.StringVar(value="Individual colors")
         self.colormap = tk.StringVar(value="viridis")
+        self.concise_hairline_info = tk.BooleanVar(value=False)
         self.new_hairline_time = tk.StringVar()
         self.settings_name = tk.StringVar()
         self.saved_settings_name = tk.StringVar()
@@ -281,37 +284,47 @@ class TrendNavigator:
         self.add_trend()
 
     def _build_controls(self):
-        self._entry_row("Graph title:", self.title)
-        self._combo_row("Time column:", self.time_column)
+        settings_columns = ttk.Frame(self.parent)
+        settings_columns.pack(fill="x")
+        settings_columns.columnconfigure((0, 1), weight=1, uniform="trend-settings")
 
-        self._section("Visible time range")
-        range_row = ttk.Frame(self.parent)
+        graph_settings = self._section("Graph and time range", settings_columns)
+        graph_settings.grid(row=0, column=0, sticky="nsew", padx=(0, 4), pady=3)
+        self._entry_row("Graph title:", self.title, parent=graph_settings, label_width=15)
+        self._combo_row(
+            "Time column:", self.time_column, parent=graph_settings, label_width=15
+        )
+        range_row = ttk.Frame(graph_settings)
         range_row.pack(fill="x", pady=2)
-        ttk.Label(range_row, text="Start:", width=8).pack(side="left")
-        ttk.Entry(range_row, textvariable=self.start_time, width=22).pack(
-            side="left", padx=(0, 8)
+        ttk.Label(range_row, text="Start:", width=7).pack(side="left")
+        ttk.Entry(range_row, textvariable=self.start_time, width=19).pack(
+            side="left", padx=(0, 6)
         )
-        ttk.Label(range_row, text="End:", width=6).pack(side="left")
-        ttk.Entry(range_row, textvariable=self.end_time, width=22).pack(side="left")
-        ttk.Label(range_row, text="YYYY-MM-DD HH:MM:SS").pack(
-            side="left", padx=(8, 0)
+        ttk.Label(range_row, text="End:", width=5).pack(side="left")
+        ttk.Entry(range_row, textvariable=self.end_time, width=19).pack(
+            side="left", padx=(0, 4)
         )
+        ttk.Label(range_row, text="YYYY-MM-DD HH:MM:SS").pack(side="left")
+        range_buttons = ttk.Frame(graph_settings)
+        range_buttons.pack(fill="x", pady=(2, 0))
         ttk.Button(
-            range_row, text="Apply", command=self.apply_time_range
-        ).pack(side="left", padx=(8, 4))
+            range_buttons, text="Apply range", command=self.apply_time_range
+        ).pack(side="left", padx=(0, 5))
         ttk.Button(
-            range_row, text="Auto range", command=self.reset_time_range
+            range_buttons, text="Auto range", command=self.reset_time_range
         ).pack(side="left")
         ttk.Label(
-            self.parent,
-            text="Scroll down to zoom in at the pointer; scroll up to zoom out. Drag to pan. Double-click to add a hairline; right-click one to delete it.",
+            graph_settings,
+            text="Scroll down to zoom at the pointer; drag to pan. Double-click to add a hairline; right-click one to delete it.",
             foreground="#666",
-        ).pack(anchor="w", padx=(22, 0), pady=(0, 3))
+            wraplength=480,
+        ).pack(anchor="w", pady=(4, 0))
 
-        self._section("Trend colors")
-        color_row = ttk.Frame(self.parent)
+        color_settings = self._section("Trend colors", settings_columns)
+        color_settings.grid(row=0, column=1, sticky="nsew", padx=(4, 0), pady=3)
+        color_row = ttk.Frame(color_settings)
         color_row.pack(fill="x", pady=2)
-        ttk.Label(color_row, text="Color selection:", width=22).pack(side="left")
+        ttk.Label(color_row, text="Color selection:", width=18).pack(side="left")
         color_mode_combo = ttk.Combobox(
             color_row,
             textvariable=self.color_mode,
@@ -321,7 +334,7 @@ class TrendNavigator:
         )
         color_mode_combo.pack(side="left")
         self._protect_combobox_wheel(color_mode_combo)
-        ttk.Label(color_row, text="Colormap:", padding=(12, 0)).pack(side="left")
+        ttk.Label(color_row, text="Colormap:", padding=(8, 0)).pack(side="left")
         colormap_combo = ttk.Combobox(
             color_row,
             textvariable=self.colormap,
@@ -332,51 +345,28 @@ class TrendNavigator:
         colormap_combo.pack(side="left")
         self._protect_combobox_wheel(colormap_combo)
 
-        self._section("Saved trend settings for this workbook")
-        settings_row = ttk.Frame(self.parent)
-        settings_row.pack(fill="x", pady=2)
-        ttk.Label(settings_row, text="Settings name:", width=16).pack(side="left")
-        ttk.Entry(settings_row, textvariable=self.settings_name, width=22).pack(
-            side="left", padx=(0, 8)
-        )
-        ttk.Label(settings_row, text="Saved settings:", width=14).pack(side="left")
-        self.saved_settings_combo = ttk.Combobox(
-            settings_row,
-            textvariable=self.saved_settings_name,
-            state="readonly",
-            width=24,
-        )
-        self.saved_settings_combo.pack(side="left", padx=(0, 8))
-        self._protect_combobox_wheel(self.saved_settings_combo)
-        ttk.Button(
-            settings_row, text="Save", command=self.save_settings
-        ).pack(side="left", padx=(0, 4))
-        ttk.Button(
-            settings_row, text="Refresh", command=self.refresh_settings
-        ).pack(side="left", padx=(0, 4))
-        ttk.Button(
-            settings_row, text="Load", command=self.load_settings
-        ).pack(side="left")
-
-        self._section("Trends (up to 16)")
+        trends_settings = self._section("Trends (up to 16)")
+        trends_settings.pack(fill="x", pady=4)
         ttk.Label(
-            self.parent,
-            text="Axes group only when trends share a side and both explicit limits match; otherwise each trend gets its own axis. A shared axis uses its first trend's number format.",
+            trends_settings,
+            text="Different chart numbers create vertically stacked plots; use the same number to overlay trends. Y axes group only when trends share a chart, side, and explicit minimum and maximum.",
             foreground="#666",
-        ).pack(anchor="w", pady=(1, 3))
-        self.trend_table = ttk.Frame(self.parent)
+            wraplength=1000,
+        ).pack(anchor="w", pady=(0, 4))
+        self.trend_table = ttk.Frame(trends_settings)
         self.trend_table.pack(fill="x")
         column_specs = (
             ("Show", 5),
-            ("Trend label", 18),
-            ("Y column", 18),
-            ("Side", 8),
-            ("Min", 10),
-            ("Max", 10),
+            ("Trend label", 16),
+            ("Y column", 16),
+            ("Chart #", 8),
+            ("Side", 7),
+            ("Min", 9),
+            ("Max", 9),
             ("Color", 7),
-            ("Units", 12),
-            ("Excel number format", 22),
-            ("", 8),
+            ("Units", 10),
+            ("Excel number format", 18),
+            ("", 7),
         )
         for column, (text, width) in enumerate(column_specs):
             self.trend_table.columnconfigure(
@@ -385,11 +375,87 @@ class TrendNavigator:
             ttk.Label(self.trend_table, text=text, width=width, anchor="w").grid(
                 row=0, column=column, sticky="ew", padx=1
             )
-        trend_buttons = ttk.Frame(self.parent)
+        trend_buttons = ttk.Frame(trends_settings)
         trend_buttons.pack(anchor="w", pady=4)
         ttk.Button(
             trend_buttons, text="Add trend", command=self.add_trend
         ).pack(side="left", padx=(0, 6))
+
+        hairlines_settings = self._section("Hairlines")
+        hairlines_settings.pack(fill="x", pady=4)
+        hairline_controls = ttk.Frame(hairlines_settings)
+        hairline_controls.pack(fill="x", pady=2)
+        ttk.Label(hairline_controls, text="Time:", width=8).pack(side="left")
+        ttk.Entry(
+            hairline_controls, textvariable=self.new_hairline_time, width=23
+        ).pack(side="left")
+        ttk.Button(
+            hairline_controls,
+            text="Add hairline",
+            command=self.add_hairline,
+        ).pack(side="left", padx=6)
+        ttk.Label(
+            hairlines_settings,
+            text="Leave time blank to place a hairline at the visible-range midpoint; values between samples are interpolated.",
+            foreground="#666",
+        ).pack(anchor="w", pady=(0, 3))
+        ttk.Checkbutton(
+            hairlines_settings,
+            text="Concise hairline info (show values only)",
+            variable=self.concise_hairline_info,
+            command=self._redraw_hairlines,
+        ).pack(anchor="w", pady=(0, 3))
+        self.hairline_rows_frame = ttk.Frame(hairlines_settings)
+        self.hairline_rows_frame.pack(fill="x")
+        self.hairline_values = ttk.Treeview(
+            hairlines_settings,
+            columns=("hairline", "time", "trend", "value"),
+            show="headings",
+            height=8,
+        )
+        for column, heading, width in (
+            ("hairline", "Hairline", 90),
+            ("time", "Time", 180),
+            ("trend", "Trend", 180),
+            ("value", "Value", 150),
+        ):
+            self.hairline_values.heading(column, text=heading)
+            self.hairline_values.column(column, width=width, anchor="w")
+        readout_scroll = ttk.Scrollbar(
+            hairlines_settings, orient="vertical", command=self.hairline_values.yview
+        )
+        self.hairline_values.configure(yscrollcommand=readout_scroll.set)
+        self.hairline_values.pack(side="left", fill="both", expand=True, pady=(4, 8))
+        readout_scroll.pack(side="left", fill="y", pady=(4, 8))
+
+        saved_settings = self._section("Saved trend settings for this workbook")
+        saved_settings.pack(fill="x", pady=4)
+        settings_row = ttk.Frame(saved_settings)
+        settings_row.pack(fill="x", pady=2)
+        ttk.Label(settings_row, text="Settings name:", width=16).pack(side="left")
+        ttk.Entry(settings_row, textvariable=self.settings_name, width=24).pack(
+            side="left", padx=(0, 12)
+        )
+        ttk.Label(settings_row, text="Saved settings:", width=14).pack(side="left")
+        self.saved_settings_combo = ttk.Combobox(
+            settings_row,
+            textvariable=self.saved_settings_name,
+            state="readonly",
+            width=28,
+        )
+        self.saved_settings_combo.pack(side="left", padx=(0, 8))
+        self._protect_combobox_wheel(self.saved_settings_combo)
+        settings_buttons = ttk.Frame(saved_settings)
+        settings_buttons.pack(anchor="w", pady=(2, 0))
+        ttk.Button(
+            settings_buttons, text="Save settings", command=self.save_settings
+        ).pack(side="left", padx=(0, 5))
+        ttk.Button(
+            settings_buttons, text="Refresh saved settings", command=self.refresh_settings
+        ).pack(side="left", padx=(0, 5))
+        ttk.Button(
+            settings_buttons, text="Load settings", command=self.load_settings
+        ).pack(side="left")
 
         ttk.Separator(self.parent).pack(fill="x", pady=(8, 6))
         ttk.Label(
@@ -415,61 +481,19 @@ class TrendNavigator:
         self.graph_frame = ttk.Frame(self.parent)
         self.graph_frame.pack(fill="both", expand=True)
 
-        self._section("Hairlines")
-        hairline_controls = ttk.Frame(self.parent)
-        hairline_controls.pack(fill="x", pady=2)
-        ttk.Label(hairline_controls, text="Time:", width=8).pack(side="left")
-        ttk.Entry(
-            hairline_controls, textvariable=self.new_hairline_time, width=23
-        ).pack(side="left")
-        ttk.Button(
-            hairline_controls,
-            text="Add hairline",
-            command=self.add_hairline,
-        ).pack(side="left", padx=6)
-        ttk.Label(
-            self.parent,
-            text="Leave time blank to place a hairline at the visible-range midpoint; values between samples are interpolated.",
-            foreground="#666",
-        ).pack(anchor="w", padx=(22, 0), pady=(0, 3))
-        self.hairline_rows_frame = ttk.Frame(self.parent)
-        self.hairline_rows_frame.pack(fill="x")
-        self.hairline_values = ttk.Treeview(
-            self.parent,
-            columns=("hairline", "time", "trend", "value"),
-            show="headings",
-            height=8,
-        )
-        for column, heading, width in (
-            ("hairline", "Hairline", 90),
-            ("time", "Time", 180),
-            ("trend", "Trend", 180),
-            ("value", "Value", 150),
-        ):
-            self.hairline_values.heading(column, text=heading)
-            self.hairline_values.column(column, width=width, anchor="w")
-        readout_scroll = ttk.Scrollbar(
-            self.parent, orient="vertical", command=self.hairline_values.yview
-        )
-        self.hairline_values.configure(yscrollcommand=readout_scroll.set)
-        self.hairline_values.pack(side="left", fill="both", expand=True, pady=(4, 8))
-        readout_scroll.pack(side="left", fill="y", pady=(4, 8))
+    def _section(self, text, parent=None):
+        return ttk.LabelFrame(parent or self.parent, text=text, padding=8)
 
-    def _section(self, text):
-        ttk.Label(self.parent, text=text, font=("", 10, "bold")).pack(
-            anchor="w", pady=(8, 3)
-        )
-
-    def _entry_row(self, label, variable):
-        row = ttk.Frame(self.parent)
+    def _entry_row(self, label, variable, parent=None, label_width=22):
+        row = ttk.Frame(parent or self.parent)
         row.pack(fill="x", pady=2)
-        ttk.Label(row, text=label, width=22).pack(side="left")
+        ttk.Label(row, text=label, width=label_width).pack(side="left")
         ttk.Entry(row, textvariable=variable).pack(side="left", fill="x", expand=True)
 
-    def _combo_row(self, label, variable):
-        row = ttk.Frame(self.parent)
+    def _combo_row(self, label, variable, parent=None, label_width=22):
+        row = ttk.Frame(parent or self.parent)
         row.pack(fill="x", pady=2)
-        ttk.Label(row, text=label, width=22).pack(side="left")
+        ttk.Label(row, text=label, width=label_width).pack(side="left")
         combo = ttk.Combobox(row, textvariable=variable, state="readonly")
         combo.pack(side="left", fill="x", expand=True)
         self._protect_combobox_wheel(combo)
@@ -492,6 +516,7 @@ class TrendNavigator:
         visible = tk.BooleanVar(value=True)
         column = tk.StringVar()
         label = tk.StringVar()
+        chart_index = tk.StringVar(value="1")
         side = tk.StringVar(value="Left")
         minimum = tk.StringVar()
         maximum = tk.StringVar()
@@ -513,6 +538,10 @@ class TrendNavigator:
         )
         column_combo.grid(row=grid_row, column=2, sticky="ew", padx=1, pady=1)
         self._protect_combobox_wheel(column_combo)
+        chart_index_entry = ttk.Entry(
+            self.trend_table, textvariable=chart_index, width=8
+        )
+        chart_index_entry.grid(row=grid_row, column=3, sticky="ew", padx=1, pady=1)
         side_combo = ttk.Combobox(
             self.trend_table,
             textvariable=side,
@@ -520,12 +549,12 @@ class TrendNavigator:
             state="readonly",
             width=8,
         )
-        side_combo.grid(row=grid_row, column=3, sticky="ew", padx=1, pady=1)
+        side_combo.grid(row=grid_row, column=4, sticky="ew", padx=1, pady=1)
         self._protect_combobox_wheel(side_combo)
         minimum_entry = ttk.Entry(self.trend_table, textvariable=minimum, width=10)
-        minimum_entry.grid(row=grid_row, column=4, sticky="ew", padx=1, pady=1)
+        minimum_entry.grid(row=grid_row, column=5, sticky="ew", padx=1, pady=1)
         maximum_entry = ttk.Entry(self.trend_table, textvariable=maximum, width=10)
-        maximum_entry.grid(row=grid_row, column=5, sticky="ew", padx=1, pady=1)
+        maximum_entry.grid(row=grid_row, column=6, sticky="ew", padx=1, pady=1)
         color_button = tk.Button(
             self.trend_table,
             text=" ",
@@ -533,21 +562,22 @@ class TrendNavigator:
             background=color.get(),
             command=lambda: self.choose_color(color, color_button),
         )
-        color_button.grid(row=grid_row, column=6, sticky="ew", padx=1, pady=1)
+        color_button.grid(row=grid_row, column=7, sticky="ew", padx=1, pady=1)
         unit_entry = ttk.Entry(self.trend_table, textvariable=unit, width=12)
-        unit_entry.grid(row=grid_row, column=7, sticky="ew", padx=1, pady=1)
+        unit_entry.grid(row=grid_row, column=8, sticky="ew", padx=1, pady=1)
         format_entry = ttk.Entry(
             self.trend_table, textvariable=number_format, width=22
         )
-        format_entry.grid(row=grid_row, column=8, sticky="ew", padx=1, pady=1)
+        format_entry.grid(row=grid_row, column=9, sticky="ew", padx=1, pady=1)
         remove_button = ttk.Button(self.trend_table, text="Remove")
-        remove_button.grid(row=grid_row, column=9, sticky="ew", padx=1, pady=1)
+        remove_button.grid(row=grid_row, column=10, sticky="ew", padx=1, pady=1)
         row = TrendRow(
             row_id,
             [
                 checkbutton,
                 label_entry,
                 column_combo,
+                chart_index_entry,
                 side_combo,
                 minimum_entry,
                 maximum_entry,
@@ -559,6 +589,7 @@ class TrendNavigator:
             visible,
             column,
             label,
+            chart_index,
             side,
             minimum,
             maximum,
@@ -590,7 +621,7 @@ class TrendNavigator:
 
     def export_settings(self):
         return {
-            "version": 1,
+            "version": 2,
             "time_column": self.time_column.get(),
             "title": self.title.get(),
             "start_time": self.start_time.get(),
@@ -602,6 +633,7 @@ class TrendNavigator:
                     "visible": row.visible.get(),
                     "column": row.column.get(),
                     "label": row.label.get(),
+                    "chart_index": row.chart_index.get(),
                     "side": row.side.get(),
                     "minimum": row.minimum.get(),
                     "maximum": row.maximum.get(),
@@ -614,7 +646,11 @@ class TrendNavigator:
         }
 
     def validate_settings(self, settings, columns=None, source_frame=None):
-        if not isinstance(settings, dict) or settings.get("version") != 1:
+        if (
+            not isinstance(settings, dict)
+            or isinstance(settings.get("version"), bool)
+            or settings.get("version") not in (1, 2)
+        ):
             raise ValueError("The saved trend settings have an unsupported format.")
         columns = self.columns if columns is None else list(columns)
         source_frame = self._source_frame if source_frame is None else source_frame
@@ -653,6 +689,11 @@ class TrendNavigator:
                 )
             if not isinstance(trend.get("visible"), bool):
                 raise ValueError(f"Saved trend {index} has an invalid visibility setting.")
+            chart_index_text = str(trend.get("chart_index", 1)).strip()
+            if not re.fullmatch(r"[1-9]\d*", chart_index_text):
+                raise ValueError(
+                    f"Saved trend {index} chart number must be a positive integer."
+                )
             if trend["visible"]:
                 values = pd.to_numeric(
                     source_frame[column], errors="coerce"
@@ -680,6 +721,7 @@ class TrendNavigator:
                     "visible": trend["visible"],
                     "column": column,
                     "label": str(trend.get("label", "")).strip() or column,
+                    "chart_index": int(chart_index_text),
                     "side": side,
                     "minimum": minimum_text,
                     "maximum": maximum_text,
@@ -719,6 +761,7 @@ class TrendNavigator:
             row.visible.set(settings_row["visible"])
             row.column.set(settings_row["column"])
             row.label.set(settings_row["label"])
+            row.chart_index.set(str(settings_row["chart_index"]))
             row.default_label = settings_row["column"]
             row.side.set(settings_row["side"])
             row.minimum.set(settings_row["minimum"])
@@ -917,6 +960,12 @@ class TrendNavigator:
             maximum = self._parse_axis_limit(
                 row.maximum.get(), f"Trend '{column_name}' maximum"
             )
+            chart_index_text = row.chart_index.get().strip()
+            if not re.fullmatch(r"[1-9]\d*", chart_index_text):
+                raise ValueError(
+                    f"Trend '{column_name}' chart number must be a positive integer."
+                )
+            chart_index = int(chart_index_text)
             if minimum is not None and maximum is not None and minimum >= maximum:
                 raise ValueError(
                     f"Trend '{column_name}' minimum must be less than its maximum."
@@ -924,6 +973,7 @@ class TrendNavigator:
             number_format = row.number_format.get().strip() or DEFAULT_NUMBER_FORMAT
             shared_limits = minimum is not None and maximum is not None
             axis_key = (
+                chart_index,
                 row.side.get(),
                 minimum,
                 maximum,
@@ -943,6 +993,7 @@ class TrendNavigator:
                     "row": row,
                     "column": column_name,
                     "label": row.label.get().strip() or column_name,
+                    "chart_index": chart_index,
                     "unit": row.unit.get().strip(),
                     "axis": axis_key,
                     "minimum": minimum,
@@ -998,39 +1049,106 @@ class TrendNavigator:
             axis_keys = sorted(
                 configs,
                 key=lambda key: (
-                    key[0] != "Left",
                     key[0],
-                    key[1] is not None,
-                    key[1] if key[1] is not None else 0,
+                    key[1] != "Left",
+                    key[1],
                     key[2] is not None,
                     key[2] if key[2] is not None else 0,
+                    key[3] is not None,
                     key[3] if key[3] is not None else 0,
+                    key[4] if key[4] is not None else 0,
                 ),
             )
-            primary_key = axis_keys[0]
-            fixed_size = self.figure_size_inches()
-            figure_size = fixed_size or (
-                max(11, 10 + 0.6 * (len(axis_keys) - 1)),
-                7,
+            chart_indices = sorted({series["chart_index"] for series in prepared})
+            side_counts_by_chart = {
+                chart_index: {
+                    side: sum(
+                        key[0] == chart_index and key[1] == side
+                        for key in axis_keys
+                    )
+                    for side in ("Left", "Right")
+                }
+                for chart_index in chart_indices
+            }
+            maximum_left_axes = max(
+                counts["Left"] for counts in side_counts_by_chart.values()
             )
-            figure = Figure(figsize=figure_size)
-            base_axes = figure.add_subplot(111)
-            base_axes.spines[
-                "right" if primary_key[0] == "Left" else "left"
-            ].set_visible(False)
-            axes = {primary_key: base_axes}
-            side_counts = {"Left": 0, "Right": 0}
-            side_counts[primary_key[0]] += 1
-            for axis_key in axis_keys[1:]:
-                axis = base_axes.twinx()
-                side_counts[axis_key[0]] += 1
-                side = axis_key[0].lower()
-                axis.spines[side].set_position(
-                    ("outward", 48 * (side_counts[axis_key[0]] - 1))
+            maximum_right_axes = max(
+                counts["Right"] for counts in side_counts_by_chart.values()
+            )
+            axis_offset_points = 36
+            left_margin_inches = 0.82 if maximum_left_axes else 0.2
+            right_margin_inches = 0.82 if maximum_right_axes else 0.2
+            fixed_size = self.figure_size_inches()
+            if fixed_size is not None:
+                external_axis_count = max(0, maximum_left_axes - 1) + max(
+                    0, maximum_right_axes - 1
                 )
-                axis.spines["left" if side == "right" else "right"].set_visible(False)
-                axis.patch.set_visible(False)
-                axes[axis_key] = axis
+                minimum_plot_width = min(1.0, fixed_size[0] * 0.1)
+                maximum_margin_width = fixed_size[0] - minimum_plot_width
+                natural_margin_width = (
+                    left_margin_inches
+                    + right_margin_inches
+                    + external_axis_count * axis_offset_points / 72
+                )
+                if natural_margin_width > maximum_margin_width:
+                    scale = maximum_margin_width / natural_margin_width
+                    left_margin_inches *= scale
+                    right_margin_inches *= scale
+                    axis_offset_points *= scale
+            if maximum_left_axes:
+                left_margin_inches += (
+                    axis_offset_points * (maximum_left_axes - 1) / 72
+                )
+            if maximum_right_axes:
+                right_margin_inches += (
+                    axis_offset_points * (maximum_right_axes - 1) / 72
+                )
+            if fixed_size is None:
+                figure_size = (
+                    max(10, left_margin_inches + right_margin_inches + 6.5),
+                    max(5.5, 2.7 * len(chart_indices) + 0.8),
+                )
+            else:
+                figure_size = fixed_size
+            figure = Figure(figsize=figure_size)
+            axes = {}
+            chart_axes = {}
+            axis_ranks = {}
+            previous_base = None
+            for subplot_index, chart_index in enumerate(chart_indices, start=1):
+                base_axes = figure.add_subplot(
+                    len(chart_indices),
+                    1,
+                    subplot_index,
+                    sharex=previous_base,
+                )
+                previous_base = base_axes
+                chart_axes[chart_index] = base_axes
+                chart_keys = [key for key in axis_keys if key[0] == chart_index]
+                primary_key = chart_keys[0]
+                primary_side = primary_key[1].lower()
+                base_axes.spines[
+                    "right" if primary_side == "left" else "left"
+                ].set_visible(False)
+                axes[primary_key] = base_axes
+                side_counts = {"Left": 0, "Right": 0}
+                side_counts[primary_key[1]] += 1
+                axis_ranks[primary_key] = 0
+                for axis_key in chart_keys[1:]:
+                    axis = base_axes.twinx()
+                    side = axis_key[1].lower()
+                    side_counts[axis_key[1]] += 1
+                    axis_rank = side_counts[axis_key[1]] - 1
+                    axis.spines[side].set_position(
+                        ("outward", axis_offset_points * axis_rank)
+                    )
+                    axis.spines[
+                        "left" if side == "right" else "right"
+                    ].set_visible(False)
+                    axis.patch.set_visible(False)
+                    axes[axis_key] = axis
+                    axis_ranks[axis_key] = axis_rank
 
             handles = []
             labels = []
@@ -1052,7 +1170,7 @@ class TrendNavigator:
                 axis_trends = [
                     series for series in prepared if series["axis"] == axis_key
                 ]
-                minimum, maximum = axis_key[1:3]
+                minimum, maximum = axis_key[2:4]
                 number_format = configs[axis_key]
                 shared = len(axis_trends) > 1
                 color = "black" if shared else axis_trends[0]["color"]
@@ -1062,7 +1180,7 @@ class TrendNavigator:
                     else series["label"]
                     for series in axis_trends
                 )
-                side = axis_key[0].lower()
+                side = axis_key[1].lower()
                 axis.spines["left" if side == "left" else "right"].set_color(color)
                 if side == "left":
                     axis.yaxis.tick_left()
@@ -1070,8 +1188,20 @@ class TrendNavigator:
                 else:
                     axis.yaxis.tick_right()
                     axis.yaxis.set_label_position("right")
-                axis.set_ylabel(label, color=color)
+                axis.set_ylabel(label, color=color, labelpad=3)
                 axis.tick_params(axis="y", colors=color)
+                axis_width = max(
+                    (figure_size[0] - left_margin_inches - right_margin_inches)
+                    * figure.dpi,
+                    1,
+                )
+                label_offset = (
+                    50 + axis_ranks[axis_key] * axis_offset_points
+                ) * figure.dpi / 72 / axis_width
+                axis.yaxis.set_label_coords(
+                    -label_offset if side == "left" else 1 + label_offset,
+                    0.5,
+                )
                 axis.yaxis.set_major_formatter(
                     FuncFormatter(
                         lambda value, _position, fmt=number_format: format_excel_number(
@@ -1082,25 +1212,29 @@ class TrendNavigator:
                 if minimum is not None or maximum is not None:
                     axis.set_ylim(bottom=minimum, top=maximum)
 
+            base_axes = chart_axes[chart_indices[0]]
             base_axes.set_xlim(display_min, display_max)
-            base_axes.xaxis.set_major_locator(mdates.AutoDateLocator())
-            base_axes.xaxis.set_major_formatter(mdates.ConciseDateFormatter(base_axes.xaxis.get_major_locator()))
-            base_axes.grid(True, axis="both", alpha=0.25)
-            base_axes.set_title(self.title.get().strip() or "Trend navigator")
+            locator = mdates.AutoDateLocator()
+            base_axes.xaxis.set_major_locator(locator)
+            base_axes.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+            for chart_base in chart_axes.values():
+                chart_base.grid(True, axis="both", alpha=0.25)
+            legend_columns = min(6, max(1, len(labels)))
+            legend_rows = int(np.ceil(len(labels) / legend_columns))
             figure.legend(
                 handles,
                 labels,
                 loc="upper center",
-                bbox_to_anchor=(0.5, 0.98),
-                ncol=min(4, max(1, len(labels))),
+                bbox_to_anchor=(0.5, 0.97),
+                ncol=legend_columns,
             )
-            left_margin = 0.1 + 0.055 * max(0, side_counts["Left"] - 1)
-            right_margin = 0.18 + 0.055 * max(0, side_counts["Right"] - 1)
+            figure.suptitle(self.title.get().strip() or "Trend navigator", y=0.99)
             figure.subplots_adjust(
-                left=min(0.38, left_margin),
-                right=max(0.5, 1 - right_margin),
-                top=0.83,
-                bottom=0.16,
+                left=left_margin_inches / figure_size[0],
+                right=1 - right_margin_inches / figure_size[0],
+                top=max(0.82, 0.91 - 0.025 * (legend_rows - 1)),
+                bottom=0.1,
+                hspace=0.2,
             )
 
             if self.canvas is not None:
@@ -1108,6 +1242,7 @@ class TrendNavigator:
             self.figure = figure
             self.figure_fixed_size = fixed_size is not None
             self.base_axes = base_axes
+            self.chart_axes = chart_axes
             self.axes_by_group = axes
             self.plotted_series = plotted_series
             self.data_time_range = (data_min, data_max)
@@ -1125,7 +1260,7 @@ class TrendNavigator:
             self.set_status(
                 f"Plotted {len(plotted_series)} trends over "
                 f"{len(np.unique(np.concatenate([s['times'] for s in plotted_series])))} "
-                "timestamps."
+                f"timestamps in {len(chart_indices)} chart(s)."
             )
         except (ValueError, TypeError, KeyError, IndexError, OverflowError) as exc:
             self.set_status(str(exc), error=True)
@@ -1137,18 +1272,24 @@ class TrendNavigator:
         )
 
     def _set_visible_range(self, lower, upper):
+        if self.base_axes is None:
+            return
         self.base_axes.set_xlim(lower, upper)
         self.start_time.set(self._time_text(lower))
         self.end_time.set(self._time_text(upper))
-        self.canvas.draw_idle()
+        self._redraw_hairlines()
 
     def _on_plot_press(self, event):
-        if event.inaxes not in self.axes_by_group.values() or event.xdata is None:
+        if (
+            self.base_axes is None
+            or event.inaxes not in self.axes_by_group.values()
+            or event.xdata is None
+        ):
             return
         if event.button == 3:
             for hairline in reversed(self.hairlines):
-                if hairline.artist is not None:
-                    contains, _details = hairline.artist.contains(event)
+                for artist in hairline.artists:
+                    contains, _details = artist.contains(event)
                     if contains:
                         self.delete_hairline(hairline.hairline_id)
                         return
@@ -1166,8 +1307,8 @@ class TrendNavigator:
             return
 
         for hairline in reversed(self.hairlines):
-            if hairline.artist is not None:
-                contains, _details = hairline.artist.contains(event)
+            for artist in hairline.artists:
+                contains, _details = artist.contains(event)
                 if contains:
                     self._drag_hairline = hairline
                     return
@@ -1177,7 +1318,7 @@ class TrendNavigator:
 
     def _on_plot_motion(self, event):
         if self._drag_hairline is not None:
-            if event.xdata is None:
+            if self.base_axes is None or event.xdata is None:
                 return
             lower, upper = self.base_axes.get_xlim()
             position = min(max(event.xdata, lower), upper)
@@ -1198,7 +1339,11 @@ class TrendNavigator:
         self._pan_start = None
 
     def _on_plot_scroll(self, event):
-        if event.inaxes not in self.axes_by_group.values() or event.xdata is None:
+        if (
+            self.base_axes is None
+            or event.inaxes not in self.axes_by_group.values()
+            or event.xdata is None
+        ):
             return
         lower, upper = self.base_axes.get_xlim()
         zoom_factor = 0.8 if event.button == "down" else 1.25
@@ -1242,8 +1387,7 @@ class TrendNavigator:
                 lower -= 1 / 86400
                 upper += 1 / 86400
             self.base_axes.set_xlim(lower, upper)
-            self.canvas.draw_idle()
-            self._update_hairline_values()
+            self._redraw_hairlines()
 
     def add_hairline(self):
         if self.base_axes is None or self.data_time_range is None:
@@ -1260,8 +1404,11 @@ class TrendNavigator:
             self.set_status(str(exc), error=True)
 
     def _create_hairline(self, timestamp):
-        position = mdates.date2num(timestamp.to_pydatetime())
-        lower, upper = self.base_axes.get_xlim()
+        base_axes = self.base_axes
+        if base_axes is None:
+            raise ValueError("Plot trends before adding a hairline.")
+        position = float(mdates.date2num(timestamp.to_pydatetime()))
+        lower, upper = base_axes.get_xlim()
         if not lower <= position <= upper:
             raise ValueError("Hairline time must fall within the visible time range.")
         hairline_id = self.next_hairline_id
@@ -1293,7 +1440,7 @@ class TrendNavigator:
 
     def update_hairline(self, hairline_id):
         hairline = self._find_hairline(hairline_id)
-        if hairline is None:
+        if hairline is None or self.base_axes is None:
             return
         try:
             timestamp = parse_time(hairline.time.get(), "Hairline time")
@@ -1309,6 +1456,12 @@ class TrendNavigator:
     def delete_hairline(self, hairline_id):
         hairline = self._find_hairline(hairline_id)
         if hairline is not None:
+            if self._drag_hairline is hairline:
+                self._drag_hairline = None
+            for artist in hairline.artists + hairline.readout_artists:
+                artist.remove()
+            hairline.artists.clear()
+            hairline.readout_artists.clear()
             hairline.frame.destroy()
             self.hairlines.remove(hairline)
             self._redraw_hairlines()
@@ -1331,67 +1484,88 @@ class TrendNavigator:
             self._redraw_hairlines()
 
     def _redraw_hairlines(self):
-        if self.base_axes is None:
+        base_axes = self.base_axes
+        if base_axes is None:
             return
         for hairline in self.hairlines:
-            if hairline.artist is not None:
-                hairline.artist.remove()
-            for artist in hairline.readout_artists:
+            for artist in hairline.artists + hairline.readout_artists:
                 artist.remove()
+            hairline.artists.clear()
             hairline.readout_artists.clear()
             timestamp = parse_time(hairline.time.get(), "Hairline time")
-            hairline.artist = self.base_axes.axvline(
-                timestamp,
-                color=hairline.color,
-                linestyle="--",
-                linewidth=1.3,
-                label=f"Hairline {hairline.hairline_id}",
-                picker=6,
-            )
-            position = mdates.date2num(timestamp.to_pydatetime())
-            readout_rows = [
-                TextArea(
-                    f"Hairline {hairline.hairline_id}  "
-                    f"{timestamp.strftime(TIME_DISPLAY_FORMAT)}",
-                    textprops={"color": hairline.color, "size": 8, "weight": "bold"},
-                )
-            ]
-            for series in self.plotted_series:
-                value = self._interpolated_value(series, position)
-                value_text = (
-                    "—"
-                    if value is None
-                    else format_excel_number(value, series["number_format"])
-                )
-                readout_rows.append(
-                    TextArea(
-                        f"{series['label']}: {value_text}",
-                        textprops={"color": series["color"], "size": 8},
+            position = float(mdates.date2num(timestamp.to_pydatetime()))
+            lower, upper = base_axes.get_xlim()
+            for chart_index, chart_axes in self.chart_axes.items():
+                hairline.artists.append(
+                    chart_axes.axvline(
+                        timestamp,
+                        color=hairline.color,
+                        linestyle="--",
+                        linewidth=1.3,
+                        label=f"Hairline {hairline.hairline_id}",
+                        picker=6,
                     )
                 )
-            readout = VPacker(
-                children=readout_rows, align="left", pad=2, sep=1
-            )
-            lower, upper = self.base_axes.get_xlim()
-            place_left = position > lower + (upper - lower) * 0.65
-            box = AnnotationBbox(
-                readout,
-                (position, 1),
-                xycoords=self.base_axes.get_xaxis_transform(),
-                xybox=(-6 if place_left else 6, -6),
-                boxcoords="offset points",
-                box_alignment=(1 if place_left else 0, 1),
-                bboxprops={
-                    "boxstyle": "round,pad=0.3",
-                    "facecolor": "white",
-                    "edgecolor": hairline.color,
-                    "alpha": 0.94,
-                },
-                annotation_clip=False,
-                zorder=10,
-            )
-            self.base_axes.add_artist(box)
-            hairline.readout_artists.append(box)
+                if not lower <= position <= upper:
+                    continue
+                chart_series = [
+                    series
+                    for series in self.plotted_series
+                    if series["chart_index"] == chart_index
+                ]
+                readout_rows = []
+                if not self.concise_hairline_info.get():
+                    readout_rows.append(
+                        TextArea(
+                            f"Hairline {hairline.hairline_id}  "
+                            f"{timestamp.strftime(TIME_DISPLAY_FORMAT)}",
+                            textprops={
+                                "color": hairline.color,
+                                "size": 8,
+                                "weight": "bold",
+                            },
+                        )
+                    )
+                for series in chart_series:
+                    value = self._interpolated_value(series, position)
+                    value_text = (
+                        "—"
+                        if value is None
+                        else format_excel_number(value, series["number_format"])
+                    )
+                    readout_text = (
+                        value_text
+                        if self.concise_hairline_info.get()
+                        else f"{series['label']}: {value_text}"
+                    )
+                    readout_rows.append(
+                        TextArea(
+                            readout_text,
+                            textprops={"color": series["color"], "size": 8},
+                        )
+                    )
+                readout = VPacker(
+                    children=readout_rows, align="left", pad=2, sep=1
+                )
+                place_left = position > lower + (upper - lower) * 0.65
+                box = AnnotationBbox(
+                    readout,
+                    (position, 1),
+                    xycoords=chart_axes.get_xaxis_transform(),
+                    xybox=(-6 if place_left else 6, -6),
+                    boxcoords="offset points",
+                    box_alignment=(1 if place_left else 0, 1),
+                    bboxprops={
+                        "boxstyle": "round,pad=0.3",
+                        "facecolor": "white",
+                        "edgecolor": hairline.color,
+                        "alpha": 0.94,
+                    },
+                    annotation_clip=False,
+                    zorder=10,
+                )
+                chart_axes.add_artist(box)
+                hairline.readout_artists.append(box)
         if self.canvas is not None:
             self.canvas.draw_idle()
         self._update_hairline_values()
