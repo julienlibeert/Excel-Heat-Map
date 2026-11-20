@@ -1,4 +1,9 @@
-"""Time-based multi-series graph controls and plotting for the Excel heat-map app."""
+"""Time-based multi-series graph controls and plotting for the Excel heat-map app.
+
+This module provides the TrendNavigator UI component, which allows users to select
+data columns, configure trend display properties (colors, axes, ranges), and generate
+interactive time-series plots with support for multiple y-axes and hairline overlays.
+"""
 
 from __future__ import annotations
 
@@ -7,196 +12,26 @@ import tkinter as tk
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from decimal import Decimal, ROUND_HALF_UP
 from tkinter import colorchooser, ttk
 
 import matplotlib
 import matplotlib.dates as mdates
 import numpy as np
 import pandas as pd
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.colors import is_color_like, to_hex
 from matplotlib.figure import Figure
 from matplotlib.offsetbox import AnnotationBbox, TextArea, VPacker
 from matplotlib.ticker import FuncFormatter
+from matplotlib.transforms import offset_copy
 
-
-MAX_TRENDS = 16
-DEFAULT_NUMBER_FORMAT = "#,##0.00"
-TIME_DISPLAY_FORMAT = "%Y-%m-%d %H:%M:%S"
-_NUMBER_PATTERN = re.compile(
-    r"[#0?][#0?,]*(?:\.[#0?]+)?(?:[Ee][+-]?[0#?]+)?"
-)
-
-
-def _split_format_sections(number_format: str) -> list[str]:
-    sections = []
-    current = []
-    in_quotes = False
-    for character in number_format:
-        if character == '"':
-            in_quotes = not in_quotes
-        if character == ";" and not in_quotes:
-            sections.append("".join(current))
-            current.clear()
-        else:
-            current.append(character)
-    sections.append("".join(current))
-    return sections
-
-
-def _format_literal(text: str) -> str:
-    output = []
-    in_quotes = False
-    index = 0
-    while index < len(text):
-        character = text[index]
-        if character == '"':
-            in_quotes = not in_quotes
-        elif character == "\\" and index + 1 < len(text):
-            index += 1
-            output.append(text[index])
-        elif character in "_*" and index + 1 < len(text):
-            index += 1
-            if character == "_":
-                output.append(" ")
-        elif character == "[" and not in_quotes:
-            close = text.find("]", index + 1)
-            if close != -1:
-                index = close
-        elif in_quotes or not character.isalnum():
-            output.append(character)
-        index += 1
-    return "".join(output)
-
-
-def _has_unquoted_percent(text: str) -> bool:
-    in_quotes = False
-    escaped = False
-    for character in text:
-        if escaped:
-            escaped = False
-        elif character == "\\":
-            escaped = True
-        elif character == '"':
-            in_quotes = not in_quotes
-        elif character == "%" and not in_quotes:
-            return True
-    return False
-
-
-def format_excel_number(value: float, number_format: str) -> str:
-    """Format common Excel numeric formats for trend-axis ticks.
-
-    Supports section-based positive/negative/zero formats, decimals, grouping,
-    percentages, scientific notation, quoted literals, and unit suffixes.
-    """
-    if not np.isfinite(value):
-        return ""
-    sections = _split_format_sections(number_format.strip())
-    if value < 0 and len(sections) > 1:
-        section = sections[1]
-        number = abs(value)
-        automatic_negative_sign = False
-    elif value == 0 and len(sections) > 2:
-        section = sections[2]
-        number = value
-        automatic_negative_sign = False
-    else:
-        section = sections[0]
-        automatic_negative_sign = value < 0
-        number = abs(value) if automatic_negative_sign else value
-
-    match = _NUMBER_PATTERN.search(section)
-    if match is None:
-        return _format_literal(section)
-
-    pattern = match.group()
-    prefix = _format_literal(section[:match.start()])
-    suffix = _format_literal(section[match.end():])
-    percent = _has_unquoted_percent(section)
-    number_value = Decimal(str(number))
-    if percent:
-        number_value *= 100
-
-    mantissa = re.split("[Ee]", pattern, maxsplit=1)[0]
-    decimal_pattern = mantissa.partition(".")[2]
-    minimum_decimals = decimal_pattern.count("0")
-    maximum_decimals = len(decimal_pattern)
-    has_grouping = "," in mantissa.partition(".")[0]
-    exponent = "E" in pattern.upper()
-    if exponent:
-        formatted = format(number_value, f".{maximum_decimals}E")
-        exponent_digits = re.search(r"[Ee][+-]?([0#?]+)$", pattern)
-        if exponent_digits is not None:
-            mantissa_text, exponent_text = formatted.split("E")
-            exponent_value = int(exponent_text)
-            sign = "+" if exponent_value >= 0 else "-"
-            formatted = (
-                f"{mantissa_text}E{sign}"
-                f"{abs(exponent_value):0{len(exponent_digits.group(1))}d}"
-            )
-    else:
-        quantum = Decimal(1).scaleb(-maximum_decimals)
-        rounded = number_value.quantize(quantum, rounding=ROUND_HALF_UP)
-        format_spec = (
-            f",.{maximum_decimals}f"
-            if has_grouping
-            else f".{maximum_decimals}f"
-        )
-        formatted = format(rounded, format_spec)
-    if maximum_decimals > minimum_decimals:
-        mantissa_text, exponent_text = (
-            formatted.split("E", maxsplit=1) if exponent else (formatted, "")
-        )
-        whole, separator, fraction = mantissa_text.partition(".")
-        fraction = fraction.rstrip("0")
-        if len(fraction) < minimum_decimals:
-            fraction += "0" * (minimum_decimals - len(fraction))
-        formatted = whole + (separator + fraction if fraction else "")
-        if exponent:
-            formatted += "E" + exponent_text
-
-    if automatic_negative_sign:
-        prefix = "-" + prefix
-    return prefix + formatted + suffix
-
-
-def parse_time(value: str, label: str) -> pd.Timestamp:
-    try:
-        timestamp = pd.Timestamp(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{label} must be a valid date/time.") from exc
-    if pd.isna(timestamp):
-        raise ValueError(f"{label} must be a valid date/time.")
-    if timestamp.tz is not None:
-        timestamp = timestamp.tz_convert(None)
-    return timestamp
-
-
-def _to_naive_datetimes(values: pd.Series) -> pd.Series:
-    try:
-        source = pd.Series(values, copy=False).reset_index(drop=True)
-        is_excel_serial = source.map(
-            lambda value: isinstance(value, (int, float, np.integer, np.floating))
-            and not isinstance(value, (bool, np.bool_))
-        )
-        result = pd.Series(pd.NaT, index=source.index, dtype="datetime64[ns, UTC]")
-        if is_excel_serial.any():
-            result.loc[is_excel_serial] = pd.to_datetime(
-                pd.to_numeric(source.loc[is_excel_serial], errors="coerce"),
-                unit="D",
-                origin="1899-12-30",
-                errors="coerce",
-                utc=True,
-            )
-        if (~is_excel_serial).any():
-            result.loc[~is_excel_serial] = pd.to_datetime(
-                source.loc[~is_excel_serial], errors="coerce", utc=True
-            )
-        return result.dt.tz_convert(None)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("The selected time column cannot be parsed as dates.") from exc
+# Import from reorganized package modules
+from ..constants import MAX_TRENDS
+from ..formats import format_excel_number, parse_time, to_naive_datetimes
+from ..formats import DEFAULT_NUMBER_FORMAT, TIME_DISPLAY_FORMAT
+from ..plots import layout_y_axes
+from .plot_controls import colormap_preview, protect_combobox_wheel
 
 
 @dataclass
@@ -216,6 +51,7 @@ class TrendRow:
     default_label: str
     column_combo: ttk.Combobox
     color_button: tk.Button
+    color_override: bool = False
 
 
 @dataclass
@@ -240,7 +76,7 @@ class TrendNavigator:
         set_status: Callable[..., None],
         figure_size_inches: Callable[[], tuple[float, float] | None] | None = None,
         save_settings: Callable[[str, dict], None] | None = None,
-        refresh_settings: Callable[[], None] | None = None,
+        refresh_settings: Callable[[], object] | None = None,
         load_settings: Callable[[str], None] | None = None,
     ) -> None:
         self.parent = parent
@@ -282,8 +118,40 @@ class TrendNavigator:
 
         self._build_controls()
         self.add_trend()
+        self._applying_settings = False
+        self.color_mode.trace_add("write", self._update_colormap_colors)
+        self.colormap.trace_add("write", self._update_colormap_colors)
 
     def _build_controls(self):
+        saved_settings = self._section("Saved trend settings for this workbook")
+        saved_settings.pack(fill="x", pady=(0, 4))
+        settings_row = ttk.Frame(saved_settings)
+        settings_row.pack(fill="x", pady=2)
+        ttk.Label(settings_row, text="Settings name:", width=16).pack(side="left")
+        ttk.Entry(settings_row, textvariable=self.settings_name, width=24).pack(
+            side="left", padx=(0, 12)
+        )
+        ttk.Label(settings_row, text="Saved settings:", width=14).pack(side="left")
+        self.saved_settings_combo = ttk.Combobox(
+            settings_row,
+            textvariable=self.saved_settings_name,
+            state="readonly",
+            width=28,
+        )
+        self.saved_settings_combo.pack(side="left", padx=(0, 8))
+        self._protect_combobox_wheel(self.saved_settings_combo)
+        settings_buttons = ttk.Frame(saved_settings)
+        settings_buttons.pack(anchor="w", pady=(2, 0))
+        ttk.Button(
+            settings_buttons, text="Save settings", command=self.save_settings
+        ).pack(side="left", padx=(0, 5))
+        ttk.Button(
+            settings_buttons, text="Refresh saved settings", command=self.refresh_settings
+        ).pack(side="left", padx=(0, 5))
+        ttk.Button(
+            settings_buttons, text="Load settings", command=self.load_settings
+        ).pack(side="left")
+
         settings_columns = ttk.Frame(self.parent)
         settings_columns.pack(fill="x")
         settings_columns.columnconfigure((0, 1), weight=1, uniform="trend-settings")
@@ -344,6 +212,7 @@ class TrendNavigator:
         )
         colormap_combo.pack(side="left")
         self._protect_combobox_wheel(colormap_combo)
+        self.cmap_preview = colormap_preview(color_settings, self.colormap)
 
         trends_settings = self._section("Trends (up to 16)")
         trends_settings.pack(fill="x", pady=4)
@@ -407,8 +276,16 @@ class TrendNavigator:
         ).pack(anchor="w", pady=(0, 3))
         self.hairline_rows_frame = ttk.Frame(hairlines_settings)
         self.hairline_rows_frame.pack(fill="x")
-        self.hairline_values = ttk.Treeview(
+        self.hairline_info_toggle = ttk.Button(
             hairlines_settings,
+            text="▼ Hairline info",
+            command=self.toggle_hairline_info,
+        )
+        self.hairline_info_toggle.pack(anchor="w", pady=(4, 0))
+        self.hairline_info_frame = ttk.Frame(hairlines_settings)
+        self.hairline_info_frame.pack(fill="both", expand=True)
+        self.hairline_values = ttk.Treeview(
+            self.hairline_info_frame,
             columns=("hairline", "time", "trend", "value"),
             show="headings",
             height=8,
@@ -422,40 +299,13 @@ class TrendNavigator:
             self.hairline_values.heading(column, text=heading)
             self.hairline_values.column(column, width=width, anchor="w")
         readout_scroll = ttk.Scrollbar(
-            hairlines_settings, orient="vertical", command=self.hairline_values.yview
+            self.hairline_info_frame,
+            orient="vertical",
+            command=self.hairline_values.yview,
         )
         self.hairline_values.configure(yscrollcommand=readout_scroll.set)
         self.hairline_values.pack(side="left", fill="both", expand=True, pady=(4, 8))
         readout_scroll.pack(side="left", fill="y", pady=(4, 8))
-
-        saved_settings = self._section("Saved trend settings for this workbook")
-        saved_settings.pack(fill="x", pady=4)
-        settings_row = ttk.Frame(saved_settings)
-        settings_row.pack(fill="x", pady=2)
-        ttk.Label(settings_row, text="Settings name:", width=16).pack(side="left")
-        ttk.Entry(settings_row, textvariable=self.settings_name, width=24).pack(
-            side="left", padx=(0, 12)
-        )
-        ttk.Label(settings_row, text="Saved settings:", width=14).pack(side="left")
-        self.saved_settings_combo = ttk.Combobox(
-            settings_row,
-            textvariable=self.saved_settings_name,
-            state="readonly",
-            width=28,
-        )
-        self.saved_settings_combo.pack(side="left", padx=(0, 8))
-        self._protect_combobox_wheel(self.saved_settings_combo)
-        settings_buttons = ttk.Frame(saved_settings)
-        settings_buttons.pack(anchor="w", pady=(2, 0))
-        ttk.Button(
-            settings_buttons, text="Save settings", command=self.save_settings
-        ).pack(side="left", padx=(0, 5))
-        ttk.Button(
-            settings_buttons, text="Refresh saved settings", command=self.refresh_settings
-        ).pack(side="left", padx=(0, 5))
-        ttk.Button(
-            settings_buttons, text="Load settings", command=self.load_settings
-        ).pack(side="left")
 
         ttk.Separator(self.parent).pack(fill="x", pady=(8, 6))
         ttk.Label(
@@ -484,6 +334,16 @@ class TrendNavigator:
     def _section(self, text, parent=None):
         return ttk.LabelFrame(parent or self.parent, text=text, padding=8)
 
+    def toggle_hairline_info(self):
+        if self.hairline_info_frame.winfo_manager():
+            self.hairline_info_frame.pack_forget()
+            self.hairline_info_toggle.configure(text="► Hairline info")
+        else:
+            self.hairline_info_frame.pack(
+                fill="both", expand=True, after=self.hairline_info_toggle
+            )
+            self.hairline_info_toggle.configure(text="▼ Hairline info")
+
     def _entry_row(self, label, variable, parent=None, label_width=22):
         row = ttk.Frame(parent or self.parent)
         row.pack(fill="x", pady=2)
@@ -500,10 +360,17 @@ class TrendNavigator:
         if label == "Time column:":
             self.time_combo = combo
 
-    @staticmethod
-    def _protect_combobox_wheel(combo):
-        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
-            combo.bind(sequence, lambda _event: "break")
+    _protect_combobox_wheel = staticmethod(protect_combobox_wheel)
+
+    def _update_colormap_colors(self, *_args):
+        if getattr(self, "_applying_settings", False) or self.color_mode.get() != "Colormap":
+            return
+        cmap = matplotlib.colormaps[self.colormap.get()]
+        for index, row in enumerate(self.trend_rows):
+            if not row.color_override:
+                color = to_hex(cmap(index / max(1, len(self.trend_rows) - 1)))
+                row.color.set(color)
+                row.color_button.configure(background=color)
 
     def add_trend(self):
         if len(self.trend_rows) >= MAX_TRENDS:
@@ -602,7 +469,9 @@ class TrendNavigator:
         )
         remove_button.configure(command=lambda trend=row: self.remove_trend(trend))
         self.trend_rows.append(row)
+        self._update_colormap_colors()
         self._choose_default_trend_column(row)
+        self._update_default_label(row)
         column_combo.bind(
             "<<ComboboxSelected>>", lambda _event: self._update_default_label(row)
         )
@@ -621,7 +490,7 @@ class TrendNavigator:
 
     def export_settings(self):
         return {
-            "version": 2,
+            "version": 3,
             "time_column": self.time_column.get(),
             "title": self.title.get(),
             "start_time": self.start_time.get(),
@@ -638,6 +507,7 @@ class TrendNavigator:
                     "minimum": row.minimum.get(),
                     "maximum": row.maximum.get(),
                     "color": row.color.get(),
+                    "color_override": row.color_override,
                     "unit": row.unit.get(),
                     "number_format": row.number_format.get(),
                 }
@@ -649,7 +519,7 @@ class TrendNavigator:
         if (
             not isinstance(settings, dict)
             or isinstance(settings.get("version"), bool)
-            or settings.get("version") not in (1, 2)
+            or settings.get("version") not in (1, 2, 3)
         ):
             raise ValueError("The saved trend settings have an unsupported format.")
         columns = self.columns if columns is None else list(columns)
@@ -662,7 +532,7 @@ class TrendNavigator:
             raise ValueError(
                 f"The saved time column '{time_column}' is not in the selected source."
             )
-        if not _to_naive_datetimes(source_frame[time_column]).notna().any():
+        if not to_naive_datetimes(source_frame[time_column]).notna().any():
             raise ValueError(
                 f"The saved time column '{time_column}' contains no valid date/time values."
             )
@@ -708,6 +578,9 @@ class TrendNavigator:
             color = trend.get("color")
             if not isinstance(color, str) or not is_color_like(color):
                 raise ValueError(f"Saved trend {index} has an invalid color.")
+            color_override = trend.get("color_override", False)
+            if not isinstance(color_override, bool):
+                raise ValueError(f"Saved trend {index} has an invalid color override.")
             minimum_text = str(trend.get("minimum", ""))
             maximum_text = str(trend.get("maximum", ""))
             minimum = self._parse_axis_limit(minimum_text, f"Trend {index} minimum")
@@ -726,6 +599,7 @@ class TrendNavigator:
                     "minimum": minimum_text,
                     "maximum": maximum_text,
                     "color": color,
+                    "color_override": color_override,
                     "unit": str(trend.get("unit", "")),
                     "number_format": str(
                         trend.get("number_format", DEFAULT_NUMBER_FORMAT)
@@ -767,6 +641,7 @@ class TrendNavigator:
             row.minimum.set(settings_row["minimum"])
             row.maximum.set(settings_row["maximum"])
             row.color.set(settings_row["color"])
+            row.color_override = settings_row["color_override"]
             row.color_button.configure(background=settings_row["color"])
             row.unit.set(settings_row["unit"])
             row.number_format.set(settings_row["number_format"])
@@ -775,8 +650,13 @@ class TrendNavigator:
         self.time_column.set(validated["time_column"])
         self.start_time.set(validated["start_time"])
         self.end_time.set(validated["end_time"])
-        self.color_mode.set(validated["color_mode"])
-        self.colormap.set(validated["colormap"])
+        self._applying_settings = True
+        try:
+            self.color_mode.set(validated["color_mode"])
+            self.colormap.set(validated["colormap"])
+        finally:
+            self._applying_settings = False
+        self._update_colormap_colors()
         for hairline in list(self.hairlines):
             self.delete_hairline(hairline.hairline_id)
 
@@ -858,6 +738,7 @@ class TrendNavigator:
             for index, row in enumerate(self.trend_rows, start=1):
                 for widget in row.widgets:
                     widget.grid_configure(row=index)
+            self._update_colormap_colors()
 
     def set_columns(self, columns: list[str], frame: pd.DataFrame | None = None) -> None:
         self.columns = list(columns)
@@ -904,6 +785,10 @@ class TrendNavigator:
         if selected:
             variable.set(selected)
             button.configure(background=selected)
+            for row in self.trend_rows:
+                if row.color is variable:
+                    row.color_override = True
+                    break
 
     def _selected_trends(self):
         selected = [row for row in self.trend_rows if row.visible.get()]
@@ -928,18 +813,11 @@ class TrendNavigator:
         time_name = self.time_column.get()
         if time_name not in columns:
             raise ValueError("Select a valid time column.")
-        times = _to_naive_datetimes(frame[time_name])
+        times = to_naive_datetimes(frame[time_name])
         if not times.notna().any():
             raise ValueError("The selected time column contains no valid date/time values.")
 
-        if self.color_mode.get() == "Colormap":
-            cmap = matplotlib.colormaps[self.colormap.get()]
-            colors = {
-                row.row_id: to_hex(cmap(index / max(1, len(self.trend_rows) - 1)))
-                for index, row in enumerate(self.trend_rows)
-            }
-        else:
-            colors = {row.row_id: row.color.get() for row in self.trend_rows}
+        colors = {row.row_id: row.color.get() for row in self.trend_rows}
 
         configs = {}
         prepared = []
@@ -1060,55 +938,9 @@ class TrendNavigator:
                 ),
             )
             chart_indices = sorted({series["chart_index"] for series in prepared})
-            side_counts_by_chart = {
-                chart_index: {
-                    side: sum(
-                        key[0] == chart_index and key[1] == side
-                        for key in axis_keys
-                    )
-                    for side in ("Left", "Right")
-                }
-                for chart_index in chart_indices
-            }
-            maximum_left_axes = max(
-                counts["Left"] for counts in side_counts_by_chart.values()
-            )
-            maximum_right_axes = max(
-                counts["Right"] for counts in side_counts_by_chart.values()
-            )
-            axis_offset_points = 36
-            left_margin_inches = 0.82 if maximum_left_axes else 0.2
-            right_margin_inches = 0.82 if maximum_right_axes else 0.2
             fixed_size = self.figure_size_inches()
-            if fixed_size is not None:
-                external_axis_count = max(0, maximum_left_axes - 1) + max(
-                    0, maximum_right_axes - 1
-                )
-                minimum_plot_width = min(1.0, fixed_size[0] * 0.1)
-                maximum_margin_width = fixed_size[0] - minimum_plot_width
-                natural_margin_width = (
-                    left_margin_inches
-                    + right_margin_inches
-                    + external_axis_count * axis_offset_points / 72
-                )
-                if natural_margin_width > maximum_margin_width:
-                    scale = maximum_margin_width / natural_margin_width
-                    left_margin_inches *= scale
-                    right_margin_inches *= scale
-                    axis_offset_points *= scale
-            if maximum_left_axes:
-                left_margin_inches += (
-                    axis_offset_points * (maximum_left_axes - 1) / 72
-                )
-            if maximum_right_axes:
-                right_margin_inches += (
-                    axis_offset_points * (maximum_right_axes - 1) / 72
-                )
             if fixed_size is None:
-                figure_size = (
-                    max(10, left_margin_inches + right_margin_inches + 6.5),
-                    max(5.5, 2.7 * len(chart_indices) + 0.8),
-                )
+                figure_size = (10.0, max(5.5, 2.7 * len(chart_indices) + 0.8))
             else:
                 figure_size = fixed_size
             figure = Figure(figsize=figure_size)
@@ -1140,9 +972,6 @@ class TrendNavigator:
                     side = axis_key[1].lower()
                     side_counts[axis_key[1]] += 1
                     axis_rank = side_counts[axis_key[1]] - 1
-                    axis.spines[side].set_position(
-                        ("outward", axis_offset_points * axis_rank)
-                    )
                     axis.spines[
                         "left" if side == "right" else "right"
                     ].set_visible(False)
@@ -1188,20 +1017,8 @@ class TrendNavigator:
                 else:
                     axis.yaxis.tick_right()
                     axis.yaxis.set_label_position("right")
-                axis.set_ylabel(label, color=color, labelpad=3)
+                axis.set_ylabel(label, color=color)
                 axis.tick_params(axis="y", colors=color)
-                axis_width = max(
-                    (figure_size[0] - left_margin_inches - right_margin_inches)
-                    * figure.dpi,
-                    1,
-                )
-                label_offset = (
-                    50 + axis_ranks[axis_key] * axis_offset_points
-                ) * figure.dpi / 72 / axis_width
-                axis.yaxis.set_label_coords(
-                    -label_offset if side == "left" else 1 + label_offset,
-                    0.5,
-                )
                 axis.yaxis.set_major_formatter(
                     FuncFormatter(
                         lambda value, _position, fmt=number_format: format_excel_number(
@@ -1230,11 +1047,24 @@ class TrendNavigator:
             )
             figure.suptitle(self.title.get().strip() or "Trend navigator", y=0.99)
             figure.subplots_adjust(
-                left=left_margin_inches / figure_size[0],
-                right=1 - right_margin_inches / figure_size[0],
+                left=0.1,
+                right=0.9,
                 top=max(0.82, 0.91 - 0.025 * (legend_rows - 1)),
                 bottom=0.1,
                 hspace=0.2,
+            )
+            left_margin_inches, right_margin_inches = layout_y_axes(
+                figure, axes, axis_ranks, fixed_size
+            )
+            if fixed_size is None:
+                figure.set_size_inches(
+                    max(10, left_margin_inches + right_margin_inches + 6.5),
+                    figure_size[1],
+                )
+            figure_width = figure.get_size_inches()[0]
+            figure.subplots_adjust(
+                left=left_margin_inches / figure_width,
+                right=1 - right_margin_inches / figure_width,
             )
 
             if self.canvas is not None:
@@ -1262,8 +1092,10 @@ class TrendNavigator:
                 f"{len(np.unique(np.concatenate([s['times'] for s in plotted_series])))} "
                 f"timestamps in {len(chart_indices)} chart(s)."
             )
+            return True
         except (ValueError, TypeError, KeyError, IndexError, OverflowError) as exc:
             self.set_status(str(exc), error=True)
+            return False
 
     @staticmethod
     def _time_text(value):
