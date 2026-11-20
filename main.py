@@ -58,6 +58,8 @@ SETTINGS_FIELDS = [
     "Above-range color",
 ]
 
+version_id = "1.0a (last updated 19/11/2026)"
+
 
 def figure_to_dib(figure, figure_size=None):
     png = io.BytesIO()
@@ -138,7 +140,7 @@ def validate_limits(lower, upper, label):
 class HeatMapApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Excel Heat Map and Trend Navigator")
+        self.root.title("Julien's Excel MatplotLib Plotter " + version_id)
         self.root.geometry("1100x900")
         self.workbook_entries = {}
         self.saved_settings = {}

@@ -28,9 +28,12 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $distribution = Join-Path $root "dist"
-$work = Join-Path $root "build\pyinstaller"
+$localBuildRoot = Join-Path $env:LOCALAPPDATA "ExcelHeatMap\build"
+$work = Join-Path $localBuildRoot "pyinstaller"
+$pyinstallerLog = Join-Path $localBuildRoot "pyinstaller.log"
 $specification = Join-Path $root "build\spec"
 $entryPoint = Join-Path $root "main.py"
+New-Item -ItemType Directory -Path $localBuildRoot -Force | Out-Null
 $arguments = @(
     "-m", "PyInstaller",
     "--noconfirm",
@@ -100,9 +103,18 @@ for path in sorted(runtime_dlls):
 
 Push-Location $root
 try {
-    & $buildPython @arguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "PyInstaller failed with exit code $LASTEXITCODE."
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & $buildPython @arguments 2>&1 | Tee-Object -FilePath $pyinstallerLog
+        $pyinstallerExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    if ($pyinstallerExitCode -ne 0) {
+        $errorSummary = Get-Content $pyinstallerLog -Tail 30 -ErrorAction SilentlyContinue
+        throw "PyInstaller failed with exit code $pyinstallerExitCode. Recent output:`n$($errorSummary -join [Environment]::NewLine)`nFull log: $pyinstallerLog"
     }
 
     $applicationFolder = Join-Path $distribution "ExcelHeatMap"
